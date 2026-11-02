@@ -1,5 +1,7 @@
 # dsh-superagent
 
+> **This fork** adds a documented, scripted way to run dsh-superagent on a ChatGPT subscription through OpenAI's Codex sign-in instead of a model API key: see [009 Codex sign-in](docs/009-codex-auth.md) and the `codex-install`, `codex-models` and `codex-use` actions of `scripts/dsh-superagent`. Everything else follows [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype).
+
 > **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
 >
 > We have adapted it for publication, so it is not identical to our internal version or the implementation described in *Exploring Super-agent Design: Towards a More Autonomous Agent System*. Some designs discussed in the article are directions for future development and are not implemented in this prototype.
@@ -14,7 +16,7 @@ Setup has many steps, so an agent does it with you. Ask your coding agent:
 
 > Read SETUP.md in this repository and set up dsh-superagent with me.
 
-It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows.
+It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows. To use a ChatGPT subscription as the model provider, say so when it asks about the model; [009 Codex sign-in](docs/009-codex-auth.md) is what it then follows.
 
 ## Documentation
 
@@ -29,6 +31,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 Codex sign-in](docs/009-codex-auth.md): a ChatGPT subscription as the model provider, through a Codex provider plugin
 
 ## Development
 

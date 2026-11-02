@@ -4,6 +4,10 @@
 `status`, `start`, and `restart` exit 0 while the service runs normally; 1 when it is stopped, duplicated, unreachable, or
 reporting a runtime error, which `restart` may fix; 2 when it runs while a component such as a Source reports an error;
 and 3 when it runs and waits for setup. A restart fixes neither 2 nor 3: they need a person.
+
+`codex-install`, `codex-models` and `codex-use` let the profile use a ChatGPT subscription through OpenAI's Codex sign-in
+instead of an API key: the first adds a community provider plugin to the profile, the second lists the `openai-codex` models
+the running service sees, and the third sets them as the Eval and Executor models (see docs/009-codex-auth.md).
 """
 
 import argparse
@@ -25,6 +29,10 @@ ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS = ROOT / '.artifacts'
 CONTROL = ARTIFACTS / 'control'
 KEEP_LOGS = 20
+# The provider plugin `codex-install` adds by default, and the provider id every known Codex plugin registers.
+CODEX_PACKAGE = '@jcy2387/dsh-codex-provider@0.2.1-rc.2'
+CODEX_PROVIDER = 'openai-codex'
+CODEX_ROLES = ('executor', 'eval')
 
 
 def control(profile):
@@ -97,6 +105,86 @@ def state(url):
 
 PART_ERROR = 2
 SETUP_WAITS = 3
+
+
+def api(url, path, method='GET', body=None):
+    """Call the management API at `url`; raise RuntimeError with the refusal text when the service refuses or does not answer."""
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {'x-orchestrator-request': '1', **({'content-type': 'application/json'} if data else {})}
+    request = urllib.request.Request(url.rstrip('/') + '/orchestrator/api/' + path, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode('utf-8', errors='replace')[:800]
+        raise RuntimeError(f'{method} {path} was refused with {error.code}: {detail}') from None
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f'dsh-superagent does not answer at {url} ({error}). Start it first, or pass --url.') from None
+
+
+def codex_install(args):
+    """Add the Codex provider plugin to the profile; the running service needs a restart to load it."""
+    dsh = shutil.which('dsh')
+    if not dsh:
+        raise RuntimeError('dsh must be on PATH.')
+    subprocess.run([dsh, 'plugin', '--profile', args.profile, 'add', args.codex_package], check=True)
+    print(f'Added {args.codex_package} to profile {args.profile}.')
+    if processes(args.profile):
+        print(f'The service is running without it: run `{sys.argv[0]} --profile {args.profile} restart` to load it.')
+    print('Then sign in: open the panel, choose Plugins in the sidebar, open the Codex provider card and click Connect.')
+    print('Browser login opens ChatGPT in this machine\'s browser; Device login shows a code for a headless or remote machine.')
+    print(f'Once connected, `{sys.argv[0]} codex-models` lists the models and `{sys.argv[0]} codex-use --model <id>` selects one.')
+    return 0
+
+
+def codex_groups(args):
+    """Return the `openai-codex` groups of the running service's model catalog, with the DSH default."""
+    catalog = api(args.url, 'models')
+    groups = [group for group in catalog.get('groups') or [] if group.get('id') == CODEX_PROVIDER]
+    if not groups:
+        raise RuntimeError(f'The model catalog of this profile has no {CODEX_PROVIDER} provider. '
+                           f'Run `{sys.argv[0]} --profile {args.profile} codex-install`, then restart.')
+    return catalog.get('default') or {}, groups
+
+
+def codex_models(args):
+    default, groups = codex_groups(args)
+    print(f"DSH default: {default.get('provider', '?')}/{default.get('model', '?')}")
+    for group in groups:
+        print(f"{group.get('id')}: {group.get('name', '')}")
+        for model in group.get('models') or []:
+            efforts = [effort.get('id') for effort in (model.get('reasoning') or {}).get('efforts') or []]
+            print(f"  {model.get('id')}  {model.get('name', '')}" + (f"  efforts: {', '.join(efforts)}" if efforts else ''))
+    return 0
+
+
+def codex_use(args):
+    """Set `openai-codex/<model>` as the model of each role in `--roles`, each block saved against its current revision."""
+    roles = [role.strip() for role in args.roles.split(',') if role.strip()]
+    unknown = [role for role in roles if role not in CODEX_ROLES]
+    if not roles or unknown:
+        raise RuntimeError(f"--roles takes a comma-separated subset of {', '.join(CODEX_ROLES)}.")
+    _, groups = codex_groups(args)
+    known = {model.get('id'): model for group in groups for model in group.get('models') or []}
+    if args.model not in known:
+        raise RuntimeError(f"{CODEX_PROVIDER} has no model {args.model}. Known: {', '.join(sorted(known))}.")
+    efforts = [effort.get('id') for effort in (known[args.model].get('reasoning') or {}).get('efforts') or []]
+    if args.effort and efforts and args.effort not in efforts:
+        raise RuntimeError(f"{args.model} takes a reasoning effort of {', '.join(efforts)}, not {args.effort}.")
+    selection = {'provider': CODEX_PROVIDER, 'model': args.model, **({'reasoningEffort': args.effort} if args.effort else {})}
+    blocks = api(args.url, 'settings').get('blocks') or {}
+    missing = [role for role in roles if not isinstance(blocks.get(role), dict) or 'value' not in blocks[role] or 'revision' not in blocks[role]]
+    if missing:
+        raise RuntimeError(f"GET settings returned no {', '.join(missing)} block; this script matches another dsh-superagent version.")
+    for role in roles:
+        block = blocks[role]
+        value = dict(block['value'], model=selection)
+        result = api(args.url, f'settings/{role}', 'PUT', {'value': value, 'revision': block['revision']})
+        print(f"{role} model: {CODEX_PROVIDER}/{args.model}" + (f" ({args.effort})" if args.effort else '') + f", revision {result['revision']}")
+        if result.get('restarting'):
+            print('dsh-superagent is restarting to apply it; wait until status no longer exits 1.')
+    print('New Sessions use it; an existing Session keeps the model it was created with.')
+    return 0
 
 
 def runtime_up(current):
@@ -208,7 +296,7 @@ def start(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status'])
+    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status', 'codex-install', 'codex-models', 'codex-use'])
     parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
     parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
@@ -218,7 +306,15 @@ def main():
                         help='Graceful shutdown timeout in seconds; running Executor Sessions finish their step first.')
     parser.add_argument('--respect-stop', action='store_true',
                         help='For monitoring: never start/restart after an intentional stop.')
+    parser.add_argument('--codex-package', default=os.environ.get('DSH_SUPERAGENT_CODEX_PACKAGE') or CODEX_PACKAGE,
+                        help=f'codex-install: the provider plugin to add to the profile (default {CODEX_PACKAGE}).')
+    parser.add_argument('--model', help='codex-use: the openai-codex model id, as codex-models lists it.')
+    parser.add_argument('--effort', help='codex-use: a reasoning effort the model offers; omit for the model default.')
+    parser.add_argument('--roles', default=','.join(CODEX_ROLES),
+                        help=f"codex-use: which roles take the model, a comma-separated subset of {', '.join(CODEX_ROLES)} (default both).")
     args = parser.parse_args()
+    if args.action == 'codex-use' and not args.model:
+        parser.error('codex-use needs --model')
     if args.timeout <= 0 or args.stop_timeout <= 0:
         parser.error('--timeout and --stop-timeout must be positive')
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
@@ -234,6 +330,12 @@ def main():
             return 0
         if args.action == 'status':
             return status(args)
+        if args.action == 'codex-install':
+            return codex_install(args)
+        if args.action == 'codex-models':
+            return codex_models(args)
+        if args.action == 'codex-use':
+            return codex_use(args)
         if args.action in ('stop', 'restart'):
             # Only a stop keeps automatic recovery off; a restart whose stop timed out leaves it on.
             stop(args, intentional=args.action == 'stop')

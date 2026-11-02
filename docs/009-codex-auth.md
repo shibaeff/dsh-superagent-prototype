@@ -23,6 +23,31 @@ scripts/dsh-superagent restart   # only if the service was running
 
 What was checked on 2026-11-02, with DSH 0.2.1-rc.3 and the plugin above in a fresh `superagent` profile: the plugin installs next to this bundle, the profile starts, the panel answers, and `GET models` lists `openai-codex` with its models and reasoning efforts before any sign-in. No model call was made.
 
+### Reusing an existing Codex CLI login
+
+If the machine already runs the official Codex CLI signed in to ChatGPT (`codex login status`), [suntianc/dsh-codex-auth](https://github.com/suntianc/dsh-codex-auth) reads that login from `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), refreshes it in place, and needs no sign-in of its own:
+
+```sh
+scripts/dsh-superagent codex-install --codex-package dsh-codex-auth@0.3.4-rc.2
+```
+
+Its `0.3.4-rc.2` build accepts DSH `0.2.1-rc.1` and `0.2.1-rc.2` only; DSH `0.2.1-rc.3` rejects the install, so pin DSH with `npm install -g @deepseek-ai/dsh@0.2.1-rc.2`, which this bundle's `engines.dsh` also allows. Codex must store its credentials in the file, not the OS keychain: set `cli_auth_credentials_store = "file"` in `~/.codex/config.toml` and run `codex login` again if `auth.json` holds no token. The plugin writes refreshed tokens back to the same file the CLI reads, so both keep working.
+
+Checked on 2026-11-02 with DSH 0.2.1-rc.2: the provider appears as `OpenAI Codex (chatgpt)`, `codex-use` saved both role models, and a one-task headless run through the provider answered, using the CLI's login and no sign-in in the panel.
+
+### Make it the profile default
+
+The Eval and Executor models cover dsh-superagent's own Sessions. Subagents a worker spawns run under DSH's `standard` preset and take the profile default, which is a DeepSeek model unless the profile says otherwise. To route them through Codex too, add to `~/.dsh/profiles/superagent/cordis.patch.yml`:
+
+```yaml
+- id: agent-default-model
+  config:
+    provider: openai-codex
+    model: gpt-5.6-sol
+```
+
+The same overlay as a file passed with `--patch` makes a one-task check: `dsh headless --patch codex-default.yml "Reply with PONG"` answers through the provider once the plugin is also in the `headless` profile.
+
 ## Sign in
 
 Signing in is an operator step: it needs a browser or a device code, and dsh-superagent must never see the account's password or tokens.
@@ -73,5 +98,6 @@ Other community plugins register the same provider and work with the same `codex
 | `codex-use` is refused with 409 | Settings changed between the read and the save. Run it again. |
 | Browser login never returns | Port `1455` is taken, or `localhost` resolves to IPv6 only. Free the port, or use Device login. |
 | Two Codex plugins in one profile, and the profile fails to load | Remove one with `dsh plugin --profile superagent remove <name>`. |
-| `dsh: host preparation failed: node-addon-require-builtin unsupported` at start | The Node binary is not an official build (seen with a nix-built Node on macOS arm64). Run `dsh` with a Node from nodejs.org, Homebrew, or an `npm install node@22` download. |
+| `dsh: installation rejected: Plugin … is incompatible with dsh …` | The plugin's DSH range excludes the installed DSH. Install a DSH version inside the range that `engines.dsh` of this bundle also allows, or another plugin; avoid `allow-version`, which loads a graph the plugin was not built against. |
+| `dsh: host preparation failed: node-addon-require-builtin unsupported` at start | The Node binary is not an official build (seen with a nix-built Node on macOS arm64). Run `dsh` with a Node from nodejs.org, Homebrew, or an `npm install node@22` download, for example through a `dsh` wrapper script earlier on `PATH` that runs `node_modules/.bin/node` of that download on `@deepseek-ai/dsh/lib/bin.js`. |
 | Tickets fail with a 429 in their reason | The subscription's usage limit. Lower `maxWorkers`, or wait for the reset the Plugins card shows. |

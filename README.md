@@ -33,6 +33,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Codex sign-in](docs/009-codex-auth.md): a ChatGPT subscription as the model provider, through a Codex provider plugin
 - [010 TUI session deletion](docs/010-tui-session-deletion.md): enable Ctrl+D for stored DeepSeek sessions in dsh-TUI 0.18.0
+- [011 Claude Code provider](docs/011-claude-code-provider.md): use your Claude login through the official SDK in `/model`, with DSH tools
 
 ## Development
 

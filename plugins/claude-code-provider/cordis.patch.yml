@@ -1,0 +1,3 @@
+- insert:
+    - id: llm-claude-code
+      name: dsh-claude-code-provider

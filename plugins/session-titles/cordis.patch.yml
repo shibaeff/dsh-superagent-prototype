@@ -1,0 +1,11 @@
+# Replace the first-message strategy; the title service permits one provider.
+- id: session-title
+  config:
+    fallbackMaxWords: 8
+    fallbackMaxBytes: 64
+    maxTitleBytes: 120
+- id: session-title-llm
+  disabled: true
+- insert:
+    - id: adaptive-session-titles
+      name: dsh-adaptive-session-titles

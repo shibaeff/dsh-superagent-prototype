@@ -61,6 +61,16 @@ class InstallerTests(unittest.TestCase):
             patch.run(self.root, restore=True)
         self.assertEqual(self.contents(), before)
 
+    def test_upgrade_extends_the_original_backup(self):
+        previous = dict(list(self.originals.items())[:-1])
+        (self.root / patch.BACKUP).write_text(json.dumps({
+            relative: {'original': original} for relative, original in previous.items()}))
+        for relative, original in previous.items():
+            (self.root / relative).write_text(patch.patched(relative, original))
+        patch.run(self.root)
+        patch.run(self.root, restore=True)
+        self.assertEqual(self.contents(), self.originals)
+
     def test_interrupted_install_can_be_completed_or_restored(self):
         for restore in (False, True):
             with self.subTest(restore=restore):

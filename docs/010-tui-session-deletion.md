@@ -16,6 +16,9 @@ select a stored session, press **Ctrl+D**, then **Enter** to confirm. **Esc**
 cancels. The normal DSH footer now shows the shortcut. Deletion uses the TUI's
 existing channel operation, which removes the transcript directory, updates
 the listing cache, and clears its recent-session and resume markers.
+Empty sessions may never create a transcript file. Deleting a stopped, unsaved
+session still clears its list entry and markers. Stored sessions can use either
+compressed or plain logs; filesystem errors continue to report failure.
 
 The current session, sessions loaded in the same TUI, and sessions held by
 another TUI are refused. To delete a loaded session, switch to another session,

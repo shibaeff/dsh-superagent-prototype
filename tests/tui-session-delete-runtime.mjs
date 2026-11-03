@@ -1,8 +1,9 @@
 // Exercise the installed, patched TUI handlers without starting an agent or deleting files.
 // node tests/tui-session-delete-runtime.mjs /path/to/@deepseek-harness-tui/dsh-tui
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { runInNewContext } from 'node:vm'
 
 const root = process.argv[2]
@@ -69,4 +70,64 @@ for (const enter of [true, false]) {
   assert.equal(deletes, enter ? 1 : 0)
   assert.equal(cleared, true)
 }
-console.log('Passed: deletion guards, backend failures, Ctrl+D focus, Enter confirmation and Esc cancellation')
+// Execute the actual storage helper against temporary data, not mocks of
+// channel.deleteSession. An empty session never had a persisted log.
+const storage = read('dsh-adapter/compat/sessionLog.js')
+const helper = storage.slice(storage.indexOf('export function deleteSessionLog(sessionId) {'))
+assert.ok(helper.startsWith('export function deleteSessionLog'))
+const temporary = mkdtempSync(join(tmpdir(), 'dsh-delete-regression-'))
+try {
+  const sessionRoot = join(temporary, 'sessions')
+  mkdirSync(join(sessionRoot, 'workspace'), { recursive: true })
+  const context = {
+    readdirSync, realpathSync, rmSync, dirname, join, sep,
+    isSafeSessionId: id => /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id),
+    sessionsRoots: () => [sessionRoot, join(temporary, 'absent-root')],
+  }
+  const remove = runInNewContext(`${helper.replace('export function', 'function')}\ndeleteSessionLog`, context)
+  for (const [id, filename] of [['compressed', 'session.v4.jsonl.zstd'], ['plain', 'session.v4.jsonl'], ['empty', undefined]]) {
+    const directory = join(sessionRoot, 'workspace', id)
+    mkdirSync(directory)
+    if (filename) writeFileSync(join(directory, filename), 'disposable test log')
+    assert.equal(remove(id), 'deleted', id)
+    assert.equal(existsSync(directory), false, id)
+  }
+  assert.equal(remove('never-persisted'), 'deleted')
+  assert.equal(remove('../workspace'), 'unavailable')
+  const outside = join(temporary, 'outside')
+  mkdirSync(outside)
+  symlinkSync(outside, join(sessionRoot, 'workspace', 'outside-link'))
+  assert.equal(remove('outside-link'), 'unavailable')
+  assert.equal(existsSync(outside), true)
+  const fail = runInNewContext(`${helper.replace('export function', 'function')}\ndeleteSessionLog`, {
+    ...context, readdirSync: () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) },
+  })
+  assert.equal(fail('unreadable'), 'unavailable')
+
+  // Verify that the real channel action forgets an unstored session's row,
+  // recent-session note and resume marker, while preserving the current one.
+  const metadata = read('dsh-adapter/channel/session-metadata.js')
+  const start = metadata.indexOf('const deleteSession = async (sessionId) => {')
+  const end = metadata.indexOf('const renameSessionTo', start)
+  const method = metadata.slice(start, end)
+  let rows = [{ id: 'never-persisted' }, { id: 'current' }]
+  const forgotten = [], agentViews = []
+  let resumeCleared = false
+  const channelDelete = runInNewContext(`${method}\ndeleteSession`, {
+    deps: { binding: { capture: () => ({ agent: { session: { id: 'current' } } }) },
+      forgetAgentView: id => agentViews.push(id) },
+    current: () => true, deleteSessionLog: remove,
+    cachedSessions: () => rows, saveMutation: next => { rows = next },
+    forgetSession: id => forgotten.push(id), readResumeTarget: () => 'never-persisted',
+    clearResumeTarget: () => { resumeCleared = true },
+  })
+  assert.equal(await channelDelete('never-persisted'), true)
+  assert.deepEqual(rows.map(row => row.id), ['current'])
+  assert.deepEqual(forgotten, ['never-persisted'])
+  assert.deepEqual(agentViews, ['never-persisted'])
+  assert.equal(resumeCleared, true)
+  assert.equal(await channelDelete('current'), false)
+} finally {
+  rmSync(temporary, { recursive: true, force: true })
+}
+console.log('Passed: keyboard, confirmation, live guards, stored and unstored deletion, metadata cleanup and filesystem refusal cases')

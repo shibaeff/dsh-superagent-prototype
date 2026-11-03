@@ -34,6 +34,40 @@ PATCHES = {
          "en: 'Switch to another session, then use Ctrl+X to stop this session before deleting it' },\n"
          "    'supervisor-delete-current':"),
     ],
+    'lib/types/dsh-adapter/compat/sessionLog.js': [
+        ("export function deleteSessionLog(sessionId) {\n"
+         "    try {\n"
+         "        const file = findSessionLogFile(sessionId);\n"
+         "        if (file === undefined)\n"
+         "            return 'unavailable';\n"
+         "        const dir = dirname(file);",
+         "export function deleteSessionLog(sessionId) {\n"
+         "    try {\n"
+         "        if (!isSafeSessionId(sessionId))\n"
+         "            return 'unavailable';\n"
+         "        // Empty DSH sessions are lazy: they may have no log at all.\n"
+         "        // Find their directory independently of the log's encoding.\n"
+         "        let dir;\n"
+         "        for (const root of sessionsRoots()) {\n"
+         "            let workspaces;\n"
+         "            try { workspaces = readdirSync(root); }\n"
+         "            catch (error) {\n"
+         "                if (error.code === 'ENOENT') continue;\n"
+         "                throw error;\n"
+         "            }\n"
+         "            for (const workspace of workspaces) {\n"
+         "                const candidate = join(root, workspace, sessionId);\n"
+         "                try { readdirSync(candidate); dir = candidate; break; }\n"
+         "                catch (error) {\n"
+         "                    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;\n"
+         "                    throw error;\n"
+         "                }\n"
+         "            }\n"
+         "            if (dir !== undefined) break;\n"
+         "        }\n"
+         "        // No stored directory: still let the caller forget its UI row.\n"
+         "        if (dir === undefined) return 'deleted';"),
+    ],
 }
 
 
@@ -66,6 +100,11 @@ def run(root, restore=False):
     backup = root / BACKUP
     if backup.exists():
         saved = json.loads(backup.read_text())
+        # A later revision may patch additional files. Keep earlier originals
+        # and validate the new files before extending the restore journal.
+        for relative in PATCHES:
+            if relative not in saved:
+                saved[relative] = {'original': (root / relative).read_text()}
         # Do not overwrite files changed by an update or a separate local patch.
         for relative in PATCHES:
             original = saved[relative]['original']
@@ -74,6 +113,8 @@ def run(root, restore=False):
                 raise ValueError(f'{relative} changed since installation; refusing to overwrite it')
         targets = {relative: saved[relative]['original'] if restore
                    else patched(relative, saved[relative]['original']) for relative in PATCHES}
+        if not restore:
+            replace(backup, json.dumps(saved))
     elif restore:
         raise ValueError('No backup found; nothing to restore')
     else:

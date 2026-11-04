@@ -36,6 +36,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [011 Claude Code provider](docs/011-claude-code-provider.md): use your Claude login through the official SDK in `/model`, with DSH tools
 - [012 Automatic topic names](docs/012-session-titles.md): adaptive names, stable follow-ups, and manual naming
 - [014 Codex skill discovery](docs/014-codex-skill-discovery.md): automatically scan your Codex skills from DSH
+- [015 Vibe CLI provider](docs/015-vibe-provider.md): use `vibe --yolo` in `/model`, with DSH tool execution
 - [013 Agent collaboration](docs/013-agent-collaboration.md): shared task context and GPT/Claude messaging
 
 ## Development

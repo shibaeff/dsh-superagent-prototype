@@ -1,0 +1,10 @@
+{
+  "name": "dsh-vibe-provider",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "dependencies": { "@deepseek-ai/dsh-llm": "0.2.1-rc.2" }
+}

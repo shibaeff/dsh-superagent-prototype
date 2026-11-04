@@ -1,0 +1,3 @@
+- insert:
+    - id: llm-vibe-cli
+      name: dsh-vibe-provider

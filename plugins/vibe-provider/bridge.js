@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { addUsage, BridgeResponseError, parseResponse, RESPONSE_CONTRACT } from './protocol.js'
 
 export const PROVIDER = 'vibe-cli'
 const HANDOFF = 'DSH_TOOL_HANDOFF'
@@ -25,11 +26,15 @@ export function requestInput(options) {
   const system = [options.system, ...messages.filter(message => message.role === 'system')
     .flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text))].filter(Boolean).join('\n\n')
   return {
-    system: `${system}\n\nYou supply one model step for DSH. The JSON input is the conversation history; continue from its last message. The dsh tool namespace exposes the available DSH tools. Request tools through that namespace. DSH executes them after this step and supplies results in the next request. Do not invent tool results.`,
-    prompt: JSON.stringify(messages.filter(message => message.role !== 'system').map(message => ({
-      role: message.role, ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
+    system: `${system}\n\n${RESPONSE_CONTRACT}`,
+    prompt: JSON.stringify({
+      latestUserRequest: messages.findLast(message => message.role === 'user' && (!message.source || message.source.kind === 'user'))?.content
+        ?? messages.findLast(message => message.role === 'user' && message.source?.kind !== 'runtime-context')?.content,
+      availableTools: options.tools ?? [],
+      conversation: messages.filter(message => message.role !== 'system').map(message => ({
+      role: message.role, ...(message.source?.kind ? { source: message.source.kind } : {}), ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
       ...(message.isError ? { isError: true } : {}), content: message.content.filter(block => block.type !== 'reasoning'),
-    }))),
+    })) }),
   }
 }
 
@@ -46,7 +51,7 @@ function killGroup(child, signal) {
 }
 
 /** Execute exactly one Vibe model step, collecting inert client-tool requests. */
-export async function runStep(options, executable = process.env.VIBE_EXECUTABLE ?? 'vibe') {
+async function runAttempt(options, executable, correction = '') {
   options.signal?.throwIfAborted()
   const input = requestInput(options)
   const directory = await mkdtemp(join(tmpdir(), 'dv-'))
@@ -107,7 +112,7 @@ export async function runStep(options, executable = process.env.VIBE_EXECUTABLE 
   })
   try {
     const routing = [...toolNames].map(([alias, name]) => `${name} -> ${alias}`).join('\n')
-    await writeFile(join(directory, 'system.txt'), `${input.system}\n\nExact tool routing:\n${routing}\nVibe native tools, including file_system.bash, are disabled. Use only the declared dsh namespace, even when the history mentions a bare tool name.`, { mode: 0o600 })
+    await writeFile(join(directory, 'system.txt'), `${input.system}\n\nOptional direct-tool routing:\n${routing}\nVibe native tools, including file_system.bash, are disabled. Prefer the JSON response contract above. If using a direct socket tool call instead, use only the declared dsh namespace. An action announcement is never a substitute for a tool request.`, { mode: 0o600 })
     await new Promise((resolve, reject) => {
       server.once('error', reject)
       server.listen(socketPath, resolve)
@@ -131,7 +136,7 @@ export async function runStep(options, executable = process.env.VIBE_EXECUTABLE 
     })
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2048) })
     child.stdin.on('error', () => {})
-    child.stdin.end(input.prompt)
+    child.stdin.end(input.prompt + (correction ? `\n\nBridge correction: ${correction}. Return the required JSON now; do not call Vibe native tools or repeat an action promise.` : ''))
     deadline = setTimeout(() => { fatal = new Error('Vibe CLI timed out'); abort() }, 310_000)
     const exit = await closed
     options.signal?.throwIfAborted()
@@ -141,7 +146,13 @@ export async function runStep(options, executable = process.env.VIBE_EXECUTABLE 
     catch { throw new Error(`Vibe CLI produced no valid export (exit ${exit.code}): ${stderr}`) }
     const handoff = pending.length > 0 && exit.code === 4 && exported.outcome === 'aborted' && exported.error?.message === HANDOFF
     const limited = exit.code === 3 && ['length', 'token_limit'].includes(exported.outcome)
+    const usage = exported.usage ? {
+      inputTokens: Math.max(0, exported.usage.input_tokens - exported.usage.cached_input_tokens), outputTokens: exported.usage.output_tokens,
+      cacheReadTokens: exported.usage.cached_input_tokens, totalTokens: exported.usage.total_tokens,
+    } : undefined
     if (pending.length && !handoff) throw new Error('Vibe did not acknowledge the DSH tool handoff')
+    if (exit.code === 3 && exported.outcome === 'turn_limit')
+      throw new BridgeResponseError('Vibe selected a disabled native tool instead of handing the operation to DSH', usage)
     if (!handoff && !limited && (exit.code !== 0 || exported.outcome !== 'finished'))
       throw new Error(`Vibe ${exported.outcome}: ${exported.error?.message ?? exported.stop_reason ?? `exit ${exit.code}`}`)
     const blocks = []
@@ -154,11 +165,11 @@ export async function runStep(options, executable = process.env.VIBE_EXECUTABLE 
     }
     blocks.push(...pending)
     if (!blocks.length) throw new Error('Vibe finished without a reply or tool call')
-    const usage = exported.usage
-    return { blocks, usage: usage ? {
-      inputTokens: Math.max(0, usage.input_tokens - usage.cached_input_tokens), outputTokens: usage.output_tokens,
-      cacheReadTokens: usage.cached_input_tokens, totalTokens: usage.total_tokens,
-    } : undefined, reason: { kind: handoff ? 'tool-calls' : limited ? 'max-tokens' : 'stop' } }
+    if (handoff || limited) return { blocks, usage, reason: { kind: handoff ? 'tool-calls' : 'max-tokens' } }
+    let response
+    try { response = parseResponse(blocks.filter(block => block.type === 'text').map(block => block.text).join(''), options) }
+    catch (error) { if (error instanceof BridgeResponseError) error.usage = usage; throw error }
+    return { blocks: response, usage, reason: { kind: response.some(block => block.type === 'tool-call') ? 'tool-calls' : 'stop' } }
   } finally {
     clearTimeout(deadline)
     clearTimeout(escalation)
@@ -170,6 +181,22 @@ export async function runStep(options, executable = process.env.VIBE_EXECUTABLE 
     for (const socket of sockets) socket.destroy()
     if (server.listening) await new Promise(resolve => server.close(resolve))
     await rm(directory, { recursive: true, force: true })
+  }
+}
+
+/** Retry one malformed/denied model step, never treating an intention as work. */
+export async function runStep(options, executable = process.env.VIBE_EXECUTABLE ?? 'vibe') {
+  let correction = '', usage
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await runAttempt(options, executable, correction)
+      return { ...result, usage: addUsage(usage, result.usage) }
+    } catch (error) {
+      if (!(error instanceof BridgeResponseError)) throw error
+      usage = addUsage(usage, error.usage)
+      if (attempt === 1) throw new Error(`Vibe could not produce a valid DSH tool request or answer after correction: ${error.message}`)
+      correction = error.message
+    }
   }
 }
 

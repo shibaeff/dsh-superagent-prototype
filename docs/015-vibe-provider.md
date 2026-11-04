@@ -25,15 +25,27 @@ It links this checkout, which must stay in place. It also reapplies the TUI
 
 Each model step invokes `vibe --yolo` in headless streaming mode, using an
 owner-only temporary Unix socket. All of Vibe's native tools are disabled.
-DSH's current tool schemas are exposed as direct client tools through Vibe's
-agent-socket protocol v2. Prefixed aliases avoid collisions with native Vibe
-tool names, while an explicit routing table maps DSH names onto those aliases.
-When Vibe calls one, the bridge records its name,
-arguments and ID, then uses the protocol's explicit abort response. Vibe
-writes its structured export and exits before executing the requested tool.
+The input preserves message-source metadata and identifies the actual latest
+user request separately from DSH's runtime-context snapshots. Conversation
+history may contain replies from other providers; it must not establish the
+current provider's identity.
 
-Only an acknowledged handoff is translated into a DSH tool call. Unknown
-tools and protocol versions fail. DSH executes the call under its own
+Vibe receives the current DSH tool schemas and a response contract: return a
+JSON tool-call list, or a final answer explicitly marked complete, blocked or
+needing input. The bridge converts declared tool requests into real DSH tool
+calls; DSH validates their argument schemas before execution. Undeclared names
+and malformed calls are rejected. A short promise such as "Reading the summary
+now" is rejected instead of being treated as a completed response.
+
+Direct client tools through Vibe's agent-socket protocol v2 remain supported.
+Prefixed aliases avoid native-name conflicts. A direct call is recorded and
+stopped with the protocol's explicit abort response before execution; only an
+acknowledged handoff is accepted. Vibe can still choose a disabled native tool,
+so a native-tool turn-limit or an invalid response gets one correction attempt
+requiring the JSON contract. A second failure reports an error rather than
+claiming work was performed. Usage across correction attempts is retained.
+
+DSH executes requested tools under its own
 permission mode, and the next Vibe step receives the result and conversation
 history. Consequently `--yolo` in the child does not change DSH's own approval
 settings. Use DSH's Full access preset when that is your intended policy.
@@ -45,6 +57,10 @@ files. Usage is read from Vibe's export and cached input is separated from
 uncached tokens for DSH's accounting. `maxTokens` is passed through Vibe's
 `VIBE_AGENT_MAX_OUTPUT_TOKENS` setting rather than its cumulative-token CLI
 budget, which also counts the prompt.
+Only the child Vibe process group created for the current model step is
+signaled. Installation and cleanup do not stop or restart any DSH instance.
+Already-running DSH processes retain their loaded adapter until the user
+chooses to restart them.
 
 ## Compatibility and limits
 
@@ -71,3 +87,11 @@ Live validation covered a standalone Vibe reply and tool request, then a full
 DSH turn that requested `bash`, executed `printf VIBE_DSH_TOOL_OK` through
 DSH, and continued from its result. The installed provider was also verified
 in the TUI's `/model` picker.
+
+The 0.1.1 regression check required DSH to read a disposable `summary.md`
+containing a random code absent from the prompt. The recorded DSH `read` call
+and matching result contained that code, and Vibe's final answer reported it.
+Subprocess tests also cover recovery from native-tool turn limits, rejected
+progress-only replies, and preserving runtime-context metadata.
+The live follow-up regression also included a prior "Reading the summary now"
+reply followed by "so"; it returned an actual `read` tool request.

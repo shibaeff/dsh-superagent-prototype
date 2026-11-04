@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { cliArguments, models, requestInput, runStep, streamStep } from './bridge.js'
+import { parseResponse } from './protocol.js'
 
 const request = { model: 'default', maxTokens: 128, messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }] }
 const tools = [{ name: 'calculate', description: 'Calculate a value', parameters: {
@@ -30,6 +31,7 @@ assert.ok(!args.includes('--model'),'default must use Vibe config');
 assert.equal(process.env.VIBE_AGENT_MAX_OUTPUT_TOKENS,'128');
 const out=arg('--output-dir');
 await mkdir(out,{recursive:true});
+let prompt='';for await(const chunk of process.stdin)prompt+=chunk;
 const exportResult=async(outcome,code,error)=>{
   await writeFile(join(out,'export.json'),JSON.stringify({outcome,error,
     usage:{input_tokens:10,output_tokens:2,cached_input_tokens:3,total_tokens:12}}));
@@ -56,9 +58,16 @@ else if(['tool','unknown-tool','bad-protocol','bad-handoff'].includes(mode)){
     if(mode==='bad-handoff')await exportResult('finished',0);
     else await exportResult('aborted',4,{message:reply.error.message});
   }
+}else if(mode==='recover-native'&&!prompt.includes('Bridge correction:')){
+  await exportResult('turn_limit',3);
 }else{
+  const correction=prompt.includes('Bridge correction:');
+  const needsTool=['json-tool','forged-tool','recover-native'].includes(mode)||(mode==='recover-progress'&&correction);
+  const progress=mode==='stuck-progress'||(mode==='recover-progress'&&!correction);
+  const reply=needsTool?{type:'tool_calls',calls:[{name:mode==='forged-tool'?'undeclared':'calculate',arguments:{x:7}}]}:
+    {type:'final',status:'complete',text:progress?'Reading the security scan summary now':'VIBE_OK'};
   console.log(JSON.stringify({type:'message',role:'user',content:[{type:'text',text:'must not echo'}]}));
-  console.log(JSON.stringify({type:'message',role:'assistant',generationStatus:'completed',content:[{type:'text',text:'VIBE_OK'}]}));
+  console.log(JSON.stringify({type:'message',role:'assistant',generationStatus:'completed',content:[{type:'text',text:mode==='limited'?'VIBE_OK':JSON.stringify(reply)}]}));
   await exportResult(mode==='limited'?'length':'finished',mode==='limited'?3:0);
 }
 `
@@ -73,10 +82,50 @@ test('history preserves system instructions, tool call IDs and error results', (
     { role: 'tool', toolCallId: 'c', isError: true, content: [{ type: 'text', text: 'failed' }] },
   ] })
   assert.match(result.system, /Use DSH tools/)
-  const history = JSON.parse(result.prompt)
+  const history = JSON.parse(result.prompt).conversation
   assert.equal(history[0].content[0].name, 'calculate')
   assert.equal(history[1].toolCallId, 'c')
   assert.equal(history[1].isError, true)
+})
+
+test('runtime context cannot replace the latest real user request', () => {
+  const result = requestInput({ messages: [
+    { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Read summary.md' }] },
+    { role: 'user', source: { kind: 'runtime-context' }, content: [{ type: 'text', text: 'Current runtime context' }] },
+  ] })
+  const input = JSON.parse(result.prompt)
+  assert.equal(input.latestUserRequest[0].text, 'Read summary.md')
+  assert.equal(input.conversation[1].source, 'runtime-context')
+  assert.match(result.system, /Do not copy their identity/)
+})
+
+test('JSON tool requests are real DSH calls, never displayed as final commentary', async () => {
+  await fakeVibe('json-tool', async executable => {
+    const result = await runStep({ ...request, tools }, executable)
+    assert.equal(result.reason.kind, 'tool-calls')
+    assert.equal(result.blocks[0].name, 'calculate')
+    assert.equal(result.blocks[0].arguments, '{"x":7}')
+  })
+})
+
+test('a native-tool denial or empty progress promise is corrected and its usage retained', async () => {
+  for (const mode of ['recover-native', 'recover-progress']) await fakeVibe(mode, async executable => {
+    const result = await runStep({ ...request, tools }, executable)
+    assert.equal(result.reason.kind, 'tool-calls')
+    assert.equal(result.blocks[0].name, 'calculate')
+    assert.equal(result.usage.inputTokens, 14)
+    assert.equal(result.usage.cacheReadTokens, 6)
+  })
+})
+
+test('repeated fake progress or undeclared tools fail instead of pretending work started', async () => {
+  for (const mode of ['stuck-progress', 'forged-tool']) await fakeVibe(mode, async executable => {
+    await assert.rejects(runStep({ ...request, tools }, executable), /after correction/)
+  })
+  assert.throws(() => parseResponse('{"type":"tool_calls","calls":[{"name":"calculate","arguments":[]}]}', { tools }), /arguments/)
+  assert.throws(() => parseResponse(JSON.stringify({ type: 'final', status: 'complete', text: 'I’m reading the summary now' }), { tools }), /announced an action/)
+  assert.deepEqual(parseResponse('{"type":"final","status":"needs_input","text":"Which repository?"}', { tools }),
+    [{ type: 'text', text: 'Which repository?' }])
 })
 
 test('CLI flags disable native tools and alias values stay separate argv entries', () => {

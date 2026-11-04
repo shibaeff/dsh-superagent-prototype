@@ -1,0 +1,5 @@
+# A host provider is inherited by DSH agent presets, including the TUI's
+# standard preset whose own filesystem provider has a separate scope.
+- insert:
+    - id: codex-skill-filesystem
+      name: dsh-codex-skills

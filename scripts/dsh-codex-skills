@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Enable automatic Codex skill discovery in an existing DSH profile."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+PACKAGE = 'dsh-codex-skills'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--profile', default='tui')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', args.profile):
+        parser.error('invalid profile name')
+    plugin = ROOT / 'plugins/codex-skills'
+    profile = Path(os.environ.get('DSH_HOME', Path.home() / '.dsh')) / 'profiles' / args.profile
+    manifest = profile / 'package.json'
+    try:
+        data = json.loads(manifest.read_text())
+        bundles = data['dsh']['profile']['bundles']
+        if not isinstance(bundles, list):
+            raise ValueError('dsh.profile.bundles must be a list')
+        subprocess.run(['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts'], cwd=plugin, check=True)
+        backup = ROOT / '.artifacts/codex-skills' / args.profile
+        backup.mkdir(parents=True, exist_ok=True)
+        original = backup / 'package.json.before-install'
+        if not original.exists():
+            original.write_text(manifest.read_text())
+        data.setdefault('dependencies', {})[PACKAGE] = f'link:{plugin}'
+        if PACKAGE not in bundles:
+            bundles.append(PACKAGE)
+        temporary = manifest.with_name('package.json.codex-skills-tmp')
+        temporary.write_text(json.dumps(data, indent=2) + '\n')
+        temporary.replace(manifest)
+        subprocess.run(['pnpm', 'install', '--ignore-scripts'], cwd=profile, check=True)
+        if data['dependencies'].get('@deepseek-harness-tui/dsh-tui') == '0.18.0':
+            subprocess.run([sys.executable, str(ROOT / 'scripts/dsh-tui-session-delete'),
+                            '--package-dir', str(profile / 'node_modules/@deepseek-harness-tui/dsh-tui')], check=True)
+        print(f'Codex skill discovery enabled in {args.profile}. Restart DSH once, then check /skills.')
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

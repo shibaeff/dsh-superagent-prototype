@@ -1794,3 +1794,31 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
 })
+
+
+it('shares durable context with nested worker subagents, detects stale writes and isolates tickets', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  expect(await runTool(sessionId, 'team_context', { action: 'read' })).toMatchObject({ revision: 0, text: '' })
+  const first = await runTool(sessionId, 'team_context', { action: 'write', revision: 0, text: 'Scope: fix the bug. Reviewer stays read-only.' })
+  expect(first).toMatchObject({ revision: 1, updatedBy: sessionId })
+  const created = (runtime as unknown as { ctx: Context }).ctx
+  for (const [id, parent] of [['reviewer', sessionId], ['nested-reviewer', 'reviewer']] as const) {
+    await (controller.create as (options: { sessionId: string }) => Promise<void>)({ sessionId: id })
+    const agent = agents.get(id)! as unknown as { session: { header: { parentSession?: string } } }
+    agent.session.header = { parentSession: parent }
+    await created.parallel('agent/created', { agent } as never)
+    expect(await runTool(id, 'team_context', { action: 'read' })).toEqual(first)
+  }
+  expect(await runTool('reviewer', 'team_context', { action: 'write', revision: 0, text: 'stale' })).toEqual({ conflict: true, current: first })
+  const updated = await runTool('nested-reviewer', 'team_context', { action: 'write', revision: 1, text: 'Reviewed commit abc; one bug.' })
+  expect(updated).toMatchObject({ revision: 2, updatedBy: 'nested-reviewer' })
+  expect(runtime.store.get(KV.sessions.context(ticket.id))).toEqual(updated)
+  expect(await runTool(sessionId, 'team_context', { action: 'read' })).toEqual(updated)
+  const other = await acceptedTicket(feishu('222', '@bot fix a different bug'))
+  expect(await runTool(other.sessionId, 'team_context', { action: 'read' })).toMatchObject({ revision: 0, text: '' })
+  await expect(runTool(sessionId, 'team_context', { action: 'read', ticket_id: other.ticket.id })).rejects.toThrow()
+  await expect(runTool(sessionId, 'team_context', { action: 'write', revision: 2, text: 'x'.repeat(16001) })).rejects.toThrow()
+  await expect(runTool(runtime.masterId, 'team_context', { action: 'read' })).rejects.toThrow('not registered')
+  runtime.engine.stopTicket(ticket.id)
+  await expect(runTool('reviewer', 'team_context', { action: 'write', revision: 2, text: 'late' })).rejects.toThrow('Ticket ended')
+})

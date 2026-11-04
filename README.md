@@ -35,6 +35,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [010 TUI session deletion](docs/010-tui-session-deletion.md): enable Ctrl+D for stored DeepSeek sessions in dsh-TUI 0.18.0
 - [011 Claude Code provider](docs/011-claude-code-provider.md): use your Claude login through the official SDK in `/model`, with DSH tools
 - [012 Automatic topic names](docs/012-session-titles.md): adaptive names, stable follow-ups, and manual naming
+- [013 Agent collaboration](docs/013-agent-collaboration.md): shared task context and GPT/Claude messaging
 
 ## Development
 

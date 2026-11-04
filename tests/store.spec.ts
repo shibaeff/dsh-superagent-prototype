@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { sharedContextTool } from '../src/app/tools/team.ts'
 import { Store, SCHEMA_VERSION } from '../src/app/store.ts'
 import { MemoryRepositories, key, type Assignment, type Decision, type Repositories, type Thread, type Ticket } from '../src/core/index.ts'
 import { threadFacts } from '../src/app/views/records.ts'
@@ -261,4 +262,20 @@ it('reads `%` and `_` in a key prefix and a search query as written, not as patt
   for (const [id, text] of [['p', 'grew 50% today'], ['q', 'grew 500 today'], ['r', 'see a_b'], ['s', 'see axb']]) store.triggers.save(said(id!, text!))
   expect([store.read.search('50%').map(item => item.id), store.read.search('a_b').map(item => item.id)]).toEqual([['p'], ['r']])
   store.close()
+})
+
+
+it('retains shared agent context and its revision across a database restart', async () => {
+  const path = join(directory, 'orchestrator.sqlite')
+  const store = new Store(path)
+  store.tickets.save(ticket('team', 'open', [{ state: 'running' }]))
+  const context = sharedContextTool(store, 'team', 'worker-team')
+  const saved = await context.execute({ action: 'write', revision: 0, text: 'Review commit abc; tests passed.' }, new AbortController().signal)
+  store.close()
+  const restored = new Store(path)
+  try {
+    const reader = sharedContextTool(restored, 'team', 'reviewer')
+    expect(await reader.execute({ action: 'read' }, new AbortController().signal)).toEqual(saved)
+    expect(await reader.execute({ action: 'write', revision: 0, text: 'stale' }, new AbortController().signal)).toEqual({ conflict: true, current: saved })
+  } finally { restored.close() }
 })
